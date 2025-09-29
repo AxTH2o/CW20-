@@ -1,0 +1,216 @@
+use cosmwasm_std::{
+    Deps, DepsMut, Env, MessageInfo, Response, StdResult, Uint128, Binary, to_binary,
+    CanonicalAddr, Storage, Timestamp, StdError,
+};
+use cw20_base::contract::{execute_burn, execute_mint, execute_transfer, execute_send};
+use cw20_base::msg::{ExecuteMsg, InstantiateMsg, QueryMsg};
+use cw20_base::state::{MinterData, TokenInfo, TOKEN_INFO};
+use cw20_base::ContractError;
+use cosmwasm_std::entry_point;
+use serde::{Deserialize, Serialize};
+use cw_storage_plus::Item;
+
+// Constantes
+const TOKEN_NAME: &str = "APZ LUNC";
+const TOKEN_SYMBOL: &str = "+LUNC";
+const DECIMALS: u8 = 6; // Estándar para tokens en Cosmos
+const INITIAL_SUPPLY: Uint128 = Uint128::new(1_000_000_000_000_000); // 1000M tokens con 6 decimales
+const REBASE_INTERVAL: u64 = 30 * 24 * 60 * 60; // 30 días en segundos
+const REBASE_RATE: u128 = 5_000; // 5% (en base a 100_000 como 100%)
+
+// Estructura para metadatos del token
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+struct TokenMetadata {
+    image_url: String, // Enlace a la imagen del token (PNG, JPEG, SVG, etc.)
+}
+
+// Estructura para información de rebase
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+struct RebaseInfo {
+    last_rebase_time: Timestamp,
+}
+
+// Almacenamiento
+const REBASE_INFO: Item<RebaseInfo> = Item::new("rebase_info");
+const TOKEN_METADATA: Item<TokenMetadata> = Item::new("token_metadata");
+
+// Mensajes personalizados
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomExecuteMsg {
+    UpdateImageUrl { image_url: String },
+}
+
+#[entry_point]
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: InstantiateMsg,
+) -> Result<Response, ContractError> {
+    // Configuración inicial del token
+    let token_info = TokenInfo {
+        name: TOKEN_NAME.to_string(),
+        symbol: TOKEN_SYMBOL.to_string(),
+        decimals: DECIMALS,
+        total_supply: INITIAL_SUPPLY,
+        mint: Some(MinterData {
+            minter: deps.api.addr_canonicalize(info.sender.as_str())?,
+            cap: None, // Sin límite de emisión
+        }),
+    };
+
+    // Guardar información del token
+    TOKEN_INFO.save(deps.storage, &token_info)?;
+
+    // Inicializar información de rebase
+    let rebase_info = RebaseInfo {
+        last_rebase_time: env.block.time,
+    };
+    REBASE_INFO.save(deps.storage, &rebase_info)?;
+
+    // Inicializar metadatos con una URL inicial (puede ser proporcionada en InstantiateMsg o predeterminada)
+    let image_url = msg
+        .image_url
+        .unwrap_or("https://example.com/apz-lunc-logo.png".to_string()); // URL por defecto
+    let metadata = TokenMetadata { image_url };
+    TOKEN_METADATA.save(deps.storage, &metadata)?;
+
+    // Crear balance inicial para el propietario
+    let owner = deps.api.addr_canonicalize(info.sender.as_str())?;
+    cw20_base::state::BALANCES.save(deps.storage, &owner, &INITIAL_SUPPLY)?;
+
+    Ok(Response::new()
+        .add_attribute("method", "instantiate")
+        .add_attribute("image_url", metadata.image_url))
+}
+
+#[entry_point]
+pub fn execute(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: ExecuteMsg,
+) -> Result<Response, ContractError> {
+    // Verificar si se necesita aplicar rebase antes de cualquier operación
+    apply_rebase(deps.storage, &env)?;
+
+    match msg {
+        ExecuteMsg::Mint { recipient, amount } => {
+            // Solo el minter puede crear tokens
+            let minter = TOKEN_INFO.load(deps.storage)?.mint.ok_or(ContractError::Unauthorized {})?;
+            let sender = deps.api.addr_canonicalize(info.sender.as_str())?;
+            if sender != minter.minter {
+                return Err(ContractError::Unauthorized {});
+            }
+            execute_mint(deps, env, info, recipient, amount)
+        }
+        ExecuteMsg::Transfer { recipient, amount } => execute_transfer(deps, env, info, recipient, amount),
+        ExecuteMsg::Burn { amount } => execute_burn(deps, env, info, amount),
+        ExecuteMsg::Send { contract, amount, msg } => execute_send(deps, env, info, contract, amount, msg),
+        ExecuteMsg::Custom(CustomExecuteMsg::UpdateImageUrl { image_url }) => {
+            // Solo el minter puede actualizar la URL de la imagen
+            let minter = TOKEN_INFO.load(deps.storage)?.mint.ok_or(ContractError::Unauthorized {})?;
+            let sender = deps.api.addr_canonicalize(info.sender.as_str())?;
+            if sender != minter.minter {
+                return Err(ContractError::Unauthorized {});
+            }
+
+            // Validar que la URL no esté vacía
+            if image_url.is_empty() {
+                return Err(ContractError::Std(StdError::generic_err("Image URL cannot be empty")));
+            }
+
+            // Actualizar metadatos
+            let metadata = TokenMetadata { image_url };
+            TOKEN_METADATA.save(deps.storage, &metadata)?;
+
+            Ok(Response::new()
+                .add_attribute("method", "update_image_url")
+                .add_attribute("new_image_url", metadata.image_url))
+        }
+        _ => cw20_base::contract::execute(deps, env, info, msg),
+    }
+}
+
+#[entry_point]
+pub fn query(deps: Deps, _env: Env, msg: QueryMsg) -> StdResult<Binary> {
+    match msg {
+        QueryMsg::TokenInfo {} => {
+            let token_info = TOKEN_INFO.load(deps.storage)?;
+            let metadata = TOKEN_METADATA.load(deps.storage)?;
+            to_binary(&TokenInfoResponse {
+                name: token_info.name,
+                symbol: token_info.symbol,
+                decimals: token_info.decimals,
+                total_supply: token_info.total_supply,
+                image_url: Some(metadata.image_url), // Incluir URL de la imagen
+            })
+        }
+        _ => cw20_base::contract::query(deps, _env, msg),
+    }
+}
+
+// Función para aplicar el rebase
+fn apply_rebase(storage: &mut dyn Storage, env: &Env) -> Result<(), ContractError> {
+    let mut rebase_info = REBASE_INFO.load(storage)?;
+    let current_time = env.block.time;
+
+    // Verificar si ha pasado el intervalo de 30 días
+    if current_time.seconds() >= rebase_info.last_rebase_time.seconds() + REBASE_INTERVAL {
+        let mut token_info = TOKEN_INFO.load(storage)?;
+        let new_supply = token_info
+            .total_supply
+            .checked_multiply_ratio(REBASE_RATE + 100_000, 100_000)
+            .map_err(|_| ContractError::Overflow {})?;
+
+        // Actualizar el suministro total
+        token_info.total_supply = new_supply;
+        TOKEN_INFO.save(storage, &token_info)?;
+
+        // Actualizar todos los balances proporcionalmente
+        let balances = cw20_base::state::BALANCES
+            .range(storage, None, None, cosmwasm_std::Order::Ascending)
+            .collect::<StdResult<Vec<(CanonicalAddr, Uint128)>>>()?;
+
+        for (addr, balance) in balances {
+            let new_balance = balance
+                .checked_multiply_ratio(REBASE_RATE + 100_000, 100_000)
+                .map_err(|_| ContractError::Overflow {})?;
+            cw20_base::state::BALANCES.save(storage, &addr, &new_balance)?;
+        }
+
+        // Actualizar el tiempo del último rebase
+        rebase_info.last_rebase_time = current_time;
+        REBASE_INFO.save(storage, &rebase_info)?;
+    }
+
+    Ok(())
+}
+
+// Modificar la respuesta de TokenInfo para incluir la URL de la imagen
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct TokenInfoResponse {
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub total_supply: Uint128,
+    pub image_url: Option<String>,
+}
+
+// Modificar InstantiateMsg para aceptar una URL inicial opcional
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct InstantiateMsg {
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub initial_balances: Vec<Cw20Coin>,
+    pub mint: Option<MinterData>,
+    pub image_url: Option<String>, // Nuevo campo para la URL de la imagen
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct Cw20Coin {
+    pub address: String,
+    pub amount: Uint128,
+}
