@@ -1,0 +1,46 @@
+// plus_lunc.rs (simplificado para claridad)
+use cosmwasm_std::*;
+use cw20_base::contract::{instantiate as cw20_instantiate, execute as cw20_execute, query as cw20_query};
+use cw20_base::msg::{InstantiateMsg as CW20InstantiateMsg};
+use cw20::Cw20Coin;
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: CW20InstantiateMsg,
+) -> Result<Response, ContractError> {
+    let custom_msg = CW20InstantiateMsg {
+        name: "Plus Lunc".to_string(),
+        symbol: "+LUNC".to_string(),
+        decimals: 6,
+        initial_balances: vec![Cw20Coin {
+            address: info.sender.to_string(),
+            amount: Uint128::new(1_000_000_000_000), // 1000 millones con 6 decimales
+        }],
+        mint: None,
+        marketing: None,
+    };
+
+    cw20_instantiate(deps, env, info, custom_msg)
+}
+
+#[cfg_attr(not(feature = "library"), entry_point)]
+pub fn execute(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: cw20_base::msg::ExecuteMsg,
+) -> Result<Response, ContractError> {
+    match msg {
+        cw20_base::msg::ExecuteMsg::Rebase {} => try_rebase(deps, env),
+        _ => cw20_execute(deps, env, info, msg),
+    }
+}
+
+pub fn try_rebase(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+    // Aquí se implementaría la lógica para aumentar balances en 30%
+    // cada 47 días, usando Croncat o Chainlink Keepers para llamar esta función
+    Ok(Response::new().add_attribute("action", "rebase"))
+}
