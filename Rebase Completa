@@ -1,0 +1,107 @@
+// plus_lunc.rs
+use cosmwasm_std::*;
+use cw20::{Cw20Coin, Cw20ReceiveMsg};
+use cw_storage_plus::Item;
+use serde::{Deserialize, Serialize};
+
+const SUPPLY: u128 = 1_000_000_000_000; // 1000 millones con 6 decimales
+const REBASE_INTERVAL: u64 = 47 * 24 * 60 * 60; // 47 días en segundos
+const REBASE_RATE: u128 = 130; // 130% (30% aumento)
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct State {
+    pub owner: Addr,
+    pub last_rebase: u64,
+    pub pre_sale_active: bool,
+}
+
+const STATE: Item<State> = Item::new("state");
+
+#[entry_point]
+pub fn instantiate(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    _msg: Binary,
+) -> Result<Response, ContractError> {
+    let state = State {
+        owner: info.sender.clone(),
+        last_rebase: env.block.time.seconds(),
+        pre_sale_active: true,
+    };
+    STATE.save(deps.storage, &state)?;
+
+    // Mint initial supply to owner
+    let mint_msg = Cw20Coin {
+        address: info.sender.to_string(),
+        amount: Uint128::new(SUPPLY),
+    };
+
+    Ok(Response::new()
+        .add_attribute("method", "instantiate")
+        .add_attribute("owner", info.sender)
+        .add_attribute("supply", SUPPLY.to_string()))
+}
+
+#[entry_point]
+pub fn execute(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    msg: ExecuteMsg,
+) -> Result<Response, ContractError> {
+    match msg {
+        ExecuteMsg::Rebase {} => try_rebase(deps, env),
+        ExecuteMsg::BuyTokens { amount } => try_buy_tokens(deps, env, info, amount),
+        ExecuteMsg::TogglePresale {} => toggle_presale(deps, info),
+    }
+}
+
+pub fn try_rebase(deps: DepsMut, env: Env) -> Result<Response, ContractError> {
+    let mut state = STATE.load(deps.storage)?;
+    let now = env.block.time.seconds();
+
+    if now < state.last_rebase + REBASE_INTERVAL {
+        return Err(ContractError::CustomError {
+            val: "Too early to rebase".to_string(),
+        });
+    }
+
+    // Aquí iría la lógica para aumentar balances en 30%
+    state.last_rebase = now;
+    STATE.save(deps.storage, &state)?;
+
+    Ok(Response::new().add_attribute("action", "rebase"))
+}
+
+pub fn try_buy_tokens(
+    deps: DepsMut,
+    env: Env,
+    info: MessageInfo,
+    amount: Uint128,
+) -> Result<Response, ContractError> {
+    let state = STATE.load(deps.storage)?;
+    if !state.pre_sale_active {
+        return Err(ContractError::CustomError {
+            val: "Presale is closed".to_string(),
+        });
+    }
+
+    let plus_lunc_amount = amount.u128() * 1000;
+    // Mint +LUNC to buyer
+    Ok(Response::new()
+        .add_attribute("action", "buy_tokens")
+        .add_attribute("buyer", info.sender)
+        .add_attribute("amount", plus_lunc_amount.to_string()))
+}
+
+pub fn toggle_presale(deps: DepsMut, info: MessageInfo) -> Result<Response, ContractError> {
+    let mut state = STATE.load(deps.storage)?;
+    if info.sender != state.owner {
+        return Err(ContractError::Unauthorized {});
+    }
+
+    state.pre_sale_active = !state.pre_sale_active;
+    STATE.save(deps.storage, &state)?;
+    Ok(Response::new().add_attribute("presale", state.pre_sale_active.to_string()))
+}
