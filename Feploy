@@ -1,0 +1,98 @@
+use cw_orchestrator::{prelude::*, environment::TxHandler};
+use cosmwasm_std::{Addr, Uint128};
+use serde::{Deserialize, Serialize};
+use std::env;
+use dotenv::dotenv;
+
+// Definir estructuras para InstantiateMsg (igual que en el contrato)
+#[derive(Serialize, Deserialize)]
+struct InstantiateMsg {
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub initial_balances: Vec<Cw20Coin>,
+    pub mint: Option<MinterData>,
+    pub image_url: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Cw20Coin {
+    pub address: String,
+    pub amount: Uint128,
+}
+
+#[derive(Serialize, Deserialize)]
+struct MinterData {
+    pub minter: String,
+    pub cap: Option<Uint128>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    dotenv().ok(); // Cargar variables de entorno desde .env
+
+    // Configuración de la red
+    let chain_id = "pisco-1"; // Terra testnet
+    let grpc_url = "https://pisco-grpc.terra.dev:443";
+    let mnemonic = env::var("MNEMONIC")?; // Mnemónico de la billetera
+
+    // Configurar la cadena
+    let chain = DaemonBuilder::new()
+        .chain_id(chain_id)
+        .mnemonic(mnemonic)
+        .grpc_url(grpc_url)
+        .build()
+        .await?;
+
+    // Compilar y optimizar el contrato
+    let contract = Contract::new("apz-lunc", &chain).await?;
+
+    // Subir el contrato a la blockchain
+    let code_id = contract.upload().await?;
+    println!("Contrato almacenado con code_id: {}", code_id);
+
+    // Preparar mensaje de instanciación
+    let init_msg = InstantiateMsg {
+        name: "APZ LUNC".to_string(),
+        symbol: "+LUNC".to_string(),
+        decimals: 6,
+        initial_balances: vec![Cw20Coin {
+            address: chain.sender_addr().to_string(),
+            amount: Uint128::new(1_000_000_000_000_000), // 1000M tokens
+        }],
+        mint: Some(MinterData {
+            minter: chain.sender_addr().to_string(),
+            cap: None, // Sin límite de emisión
+        }),
+        image_url: Some("https://ipfs.io/ipfs/QmYourImageHash/logo.png".to_string()),
+    };
+
+    // Instanciar el contrato
+    let contract_addr = contract.instantiate(&init_msg, Some(&chain.sender_addr()), None).await?;
+    println!("Contrato instanciado en: {}", contract_addr);
+
+    // Verificar información del token
+    let token_info: TokenInfoResponse = contract
+        .query(&QueryMsg::TokenInfo {})
+        .await?;
+    println!("Información del token: {:?}", token_info);
+
+    Ok(())
+}
+
+// Estructura para la respuesta de TokenInfo
+#[derive(Serialize, Deserialize, Debug)]
+struct TokenInfoResponse {
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub total_supply: Uint128,
+    pub image_url: Option<String>,
+}
+
+// Definir QueryMsg para la consulta
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+enum QueryMsg {
+    TokenInfo {},
+}
